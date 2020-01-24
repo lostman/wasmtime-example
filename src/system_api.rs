@@ -2,12 +2,12 @@ use cranelift_codegen::ir::types::{Type, I32, I64};
 use cranelift_codegen::{ir, isa};
 use cranelift_entity::PrimaryMap;
 use target_lexicon::HOST;
-use wasmtime::{HostRef, Instance, Store};
+use wasmtime::{Instance, Store};
 use wasmtime_environ::translate_signature;
 use wasmtime_runtime::{Export, VMContext};
 use wasmtime_runtime::{Imports, InstanceHandle, InstantiationError, VMFunctionBody};
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 pub trait AbiRet {
     type Abi;
@@ -81,7 +81,7 @@ cast32!(i8 i16 i32 u8 u16 u32);
 cast64!(i64 u64);
 
 macro_rules! syscalls {
-    ($(pub unsafe extern "C" fn $name:ident($ctx:ident: *mut VMContext $(, $arg:ident: $ty:ty)*,) -> $ret:ty {
+    ($(pub unsafe extern "C" fn $name:ident($ctx:ident: *mut VMContext, $caller_ctx:ident: *mut VMContext $(, $arg:ident: $ty:ty)*,) -> $ret:ty {
         $($body:tt)*
     })*) => ($(
         pub mod $name {
@@ -105,19 +105,21 @@ macro_rules! syscalls {
             /// a compiler bug which prvents that from being cast to a `usize`.
             pub static SHIM: unsafe extern "C" fn(
                 *mut VMContext,
+                *mut VMContext,
                 $(<$ty as AbiParam>::Abi),*
             ) -> <$ret as AbiRet>::Abi = shim;
 
             unsafe extern "C" fn shim(
                 $ctx: *mut VMContext,
+                $caller_ctx: *mut VMContext,
                 $($arg: <$ty as AbiParam>::Abi,)*
             ) -> <$ret as AbiRet>::Abi {
-                let r = super::$name($ctx, $(<$ty as AbiParam>::convert($arg),)*);
+                let r = super::$name($ctx, $caller_ctx, $(<$ty as AbiParam>::convert($arg),)*);
                 <$ret as AbiRet>::convert(r)
             }
         }
 
-        pub unsafe extern "C" fn $name($ctx: *mut VMContext, $($arg: $ty,)*) -> $ret {
+        pub unsafe extern "C" fn $name($ctx: *mut VMContext, $caller_ctx: *mut VMContext, $($arg: $ty,)*) -> $ret {
             $($body)*
         }
     )*)
@@ -125,7 +127,7 @@ macro_rules! syscalls {
 
 fn get_memory(vmctx: &mut VMContext) -> &mut [u8] {
     unsafe {
-        match vmctx.lookup_global_export("memory") {
+        match InstanceHandle::from_vmctx(vmctx).lookup("memory") {
             Some(Export::Memory {
                 definition,
                 vmctx: _,
@@ -143,11 +145,11 @@ pub trait SystemApi {
     fn debug_print(&self, heap: &[u8], src: u32, length: u32);
 }
 
-fn get_system_api(vmctx: &mut VMContext) -> &mut dyn SystemApi {
+fn get_system_api(vmctx: &VMContext) -> &dyn SystemApi {
     unsafe {
         vmctx
             .host_state()
-            .downcast_mut::<*mut dyn SystemApi>()
+            .downcast_ref::<*mut dyn SystemApi>()
             .expect("downcast failed")
             .as_mut()
             .expect("pointer is null")
@@ -157,16 +159,17 @@ fn get_system_api(vmctx: &mut VMContext) -> &mut dyn SystemApi {
 syscalls! {
     pub unsafe extern "C" fn debug_print(
         vmctx: *mut VMContext,
+        caller_vmctx: *mut VMContext,
         src: u32,
         length: u32,
     ) -> () {
         get_system_api(&mut *vmctx)
-            .debug_print(get_memory(&mut *vmctx), src, length)
+            .debug_print(get_memory(&mut *caller_vmctx), src, length)
     }
 }
 
 pub fn create_instance(
-    store: &HostRef<Store>,
+    store: &Store,
     system_api: &mut (dyn SystemApi + 'static),
 ) -> Result<Instance, InstantiationError> {
     let mut finished_functions = PrimaryMap::new();
@@ -197,19 +200,19 @@ pub fn create_instance(
     }
 
     signature!(debug_print);
-    let global_exports = store.borrow().global_exports().clone();
     let imports = Imports::none();
     let data_initializers = vec![];
     let signatures = PrimaryMap::new();
-    let instance_handle = InstanceHandle::new(
-        Rc::new(module),
-        global_exports,
-        finished_functions.into_boxed_slice(),
-        imports,
-        &data_initializers,
-        signatures.into_boxed_slice(),
-        None,
-        Box::new(system_api as *mut _),
-    )?;
+    let instance_handle = unsafe {
+        InstanceHandle::new(
+            Arc::new(module),
+            finished_functions.into_boxed_slice(),
+            imports,
+            &data_initializers,
+            signatures.into_boxed_slice(),
+            None,
+            Box::new(system_api as *mut _),
+        )?
+    };
     Ok(Instance::from_handle(store, instance_handle))
 }
