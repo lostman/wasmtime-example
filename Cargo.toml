@@ -1,0 +1,16 @@
+[package]
+name = "wasmtime-example"
+version = "0.1.0"
+authors = ["Krzysztof Woś <krzysztof.wos@pm.me>"]
+edition = "2018"
+
+[dependencies]
+anyhow = "1.0.22"
+cranelift-codegen = "0.52.0"
+cranelift-entity = "0.52.0"
+structopt = "0.3.4"
+target-lexicon = "0.9.0"
+wabt = "0.9.2"
+wasmtime = { git = "https://github.com/bytecodealliance/wasmtime.git", rev = "9ead93684e1539a1d2bac0a8edc07c3e288360d1" }
+wasmtime-environ = { git = "https://github.com/bytecodealliance/wasmtime.git", rev = "9ead93684e1539a1d2bac0a8edc07c3e288360d1" }
+wasmtime-runtime = { git = "https://github.com/bytecodealliance/wasmtime.git", rev = "9ead93684e1539a1d2bac0a8edc07c3e288360d1" }
