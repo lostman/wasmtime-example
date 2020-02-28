@@ -1,7 +1,6 @@
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, Context};
 use structopt::StructOpt;
-use wasmtime::{Config, Engine, Instance, Module, Store};
-use wasmtime_example::system_api::{create_instance, SystemApi};
+use wasmtime::{Config, Engine, Func, Instance, Module, Store};
 
 use std::{
     fs::File,
@@ -25,37 +24,27 @@ fn read_wasm_source(path: &Path) -> anyhow::Result<Vec<u8>> {
         .context("failed to translate Wasm text source to Wasm binary format")?)
 }
 
-struct SystemApiImpl;
-
-impl SystemApi for SystemApiImpl {
-    fn debug_print(&self, heap: &[u8], src: u32, length: u32) {
-        let src = src as usize;
-        let length = length as usize;
-        eprintln!("debug.print: {}", unsafe {
-            str::from_utf8_unchecked(&heap[src..src + length])
-        });
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     let opt = Opt::from_args();
     let binary = read_wasm_source(&opt.source).context("failed to read Wasm binary")?;
     let config = Config::default();
     let engine = Engine::new(&config);
     let store = Store::new(&engine);
-    let mut system_api_impl = SystemApiImpl;
-    let system_api_instance = create_instance(&store, &mut system_api_impl)
-        .context("failed to create system API instance")?;
     let module = Module::new(&store, &binary).context("failed to instantiate module")?;
-    let mut externs = vec![];
 
-    for import in module.imports().iter() {
-        let export_name = format!("{}_{}", import.module(), import.name());
-        match system_api_instance.get_export(&export_name) {
-            Some(export) => externs.push(export.clone()),
-            _ => bail!("export not found: {}", export_name),
-        }
-    }
+    let debug_print = Func::wrap3(
+        &store,
+        |heap: wasmtime_example::wasi_caller_memory::WasiCallerMemory, src: i32, length: i32| {
+            let src = src as usize;
+            let length = length as usize;
+            let heap = unsafe { heap.get().unwrap() };
+            eprintln!("debug.print: {}", unsafe {
+                str::from_utf8_unchecked(&heap[src..src + length])
+            });
+        },
+    );
+
+    let externs = vec![wasmtime::Extern::Func(debug_print)];
 
     let instance = Instance::new(&module, &externs).context("failed to instantiate instance")?;
 
@@ -77,19 +66,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     let wasmtime_memory = instance
-        .get_wasmtime_memory()
-        .ok_or_else(|| anyhow!("Wasmtime memory not found"))?;
+        .get_export("memory")
+        .expect("memory")
+        .memory()
+        .expect("memory");
 
-    match wasmtime_memory {
-        wasmtime_runtime::Export::Memory { definition, .. } => unsafe {
-            let base = (*definition).base;
-            let current_length = (*definition).current_length;
-            let slice = std::slice::from_raw_parts(base, current_length);
-            println!("Wasmtime memory[..16] = {:?}", &slice[..16]);
-        },
-        _ => {
-            panic!("Wasmtime memory is not a memory");
-        }
+    unsafe {
+        println!(
+            "Wasmtime memory[..16] = {:?}",
+            &wasmtime_memory.data_unchecked()[..16]
+        );
     }
 
     let results = instance
